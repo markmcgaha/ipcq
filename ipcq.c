@@ -21,6 +21,12 @@
 #define ACTION_UNIQ_Q   4
 #define ACTION_Q_EXISTS 5
 
+/*
+ * Tune sql_get_t polling frequency
+ */
+#define POLLS_PER_SECOND 3
+#define POLL_INTERVAL_USEC (1000000 / POLLS_PER_SECOND)
+
 
 struct msgbuf {
     long mtype;
@@ -76,7 +82,7 @@ int main(int argc, char *argv[])
             case 'H':
             case '?':
                 help(argv[0], EXIT_SUCCESS);
-                break;
+                /* break not required - help exits */
             case 'n':
             case 'N':
                 action = ACTION_UNIQ_Q;
@@ -107,7 +113,6 @@ int main(int argc, char *argv[])
                 break;
             default:
                 help(argv[0], EXIT_FAILURE);
-                break;
         }
     }
     if (!path && i < argc) {
@@ -121,38 +126,26 @@ int main(int argc, char *argv[])
     switch (action) {
         case ACTION_GET:
             return sq_get(path, clean);
-            break;
         case ACTION_QUEUE:
             return sq_queue(path, message);
-            break;
         case ACTION_Q_EXISTS:
             if (getqk_exists(path) < 0)
                 return EXIT_FAILURE;
-            else
-                return EXIT_SUCCESS;
-            break;
+            return EXIT_SUCCESS;
         case ACTION_TIME:
             if (sq_get_t(path, clean, wtime) < 0)
                 return EXIT_FAILURE;
-            else
-                return EXIT_SUCCESS;
-            break;
+            return EXIT_SUCCESS;
         case ACTION_UNIQ_Q:
             if (getqk_uniq(path) < 0)
                 return EXIT_FAILURE;
-            else
-                return EXIT_SUCCESS;
-            break;
+            return EXIT_SUCCESS;
         default:
-            if (clean) {
+            if (clean)
                 if (cleanq(getqk(path)) < 0)
                     return EXIT_FAILURE;
-                else
-                    return EXIT_SUCCESS;
-            } else {
-                help(argv[0], EXIT_FAILURE);
-            }
-            break;
+                return EXIT_SUCCESS;
+            help(argv[0], EXIT_FAILURE);
     }
 
     return (EXIT_SUCCESS);
@@ -210,7 +203,6 @@ int sq_queue(char *path, char *message)
 {
     struct msgbuf buf;
     int msqk;
-    int i = 0;
 
     buf.mtype = 1;
 
@@ -219,14 +211,17 @@ int sq_queue(char *path, char *message)
     }
 
     if (message) {
-        for (i = 0; i < (MSIZE - 2) && message[i]; i++) {
-            buf.mtext[i] = message[i];
-        }
-
-        buf.mtext[i] = '\0';
+        /* Copy message into buffer, ensuring null termination */
+        strncpy(buf.mtext, message, MSIZE - 1);
+        buf.mtext[MSIZE - 1] = '\0';  /* guarantee null-terminated string */
+    } else {
+        buf.mtext[0] = '\0';  /* send empty string if message is NULL */
     }
 
-    return msgsnd(msqk, &buf, i + 1, 0);
+    /* Send the string including the null terminator */
+    size_t msg_len = strlen(buf.mtext) + 1;
+
+    return msgsnd(msqk, &buf, msg_len, 0);
 }
 
 
@@ -275,14 +270,15 @@ int sq_get_t(char *path, int clean, int sec)
     int msqk;
     int retval = -1;
     int i;
+    int total_attempts;
 
     if ((msqk = getqk(path)) < 0) {
         return -1;
     }
 
     buf.mtext[0] = '\0';
-    sec *= 3;
-    for (i = 0; i < sec; i++) {
+    total_attempts = sec * POLLS_PER_SECOND;
+    for (i = 0; i < total_attempts; i++) {
         if (msgrcv(msqk, &buf, MSIZE, 0, IPC_NOWAIT) >= 0) {
             retval = 0;
             break;
@@ -290,10 +286,9 @@ int sq_get_t(char *path, int clean, int sec)
 
         if (errno != ENOMSG) {
             return -1;
-            break;
         }
 
-        usleep(332000);
+        usleep(POLL_INTERVAL_USEC);
     }
     if (buf.mtext[0]) {
         printf("%s\n", buf.mtext);
